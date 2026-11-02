@@ -1720,6 +1720,7 @@ function syncSchedule() { if (!SYNC.enabled || !SYNC.ready) return; clearTimeout
 async function syncNow() {
   if (!SYNC.enabled || !SYNC.ready) return;
   if (SYNC.busy) { SYNC.again = true; return; }
+  if (!USER) return; // pas de synchronisation tant que le compte connecté n'est pas identifié
   if (!AUTH.s) { SYNC.pending = computeDiff().length; setSyncState('auth'); return; }
   SYNC.busy = true; setSyncState('sync');
   try {
