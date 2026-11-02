@@ -130,7 +130,10 @@ table.t td.n,table.t th.n{text-align:right}
 #saved.sync-ok{color:var(--ok)}#saved.sync-off,#saved.sync-notable{color:var(--bad);font-weight:600}#saved.sync-sync{color:var(--info)}#saved.sync-auth{color:var(--warn);font-weight:700}
 #ubox{display:flex;gap:6px;align-items:center}
 #ubox .uname{font-weight:600;font-size:13px;white-space:nowrap;margin-left:6px}
-#login{position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 30% 20%,#ffffff 0%,#f3f8f4 45%,#e9f1ec 100%)}
+#login{position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 25% 15%,#1c8a4f 0%,#0f5f35 38%,#0a4326 70%,#062b18 100%)}
+#login::before{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(135deg,rgba(255,255,255,.025) 0 2px,transparent 2px 14px)}
+#login .lbox{position:relative}
+#login input:focus{border-color:#0f7a3c!important;box-shadow:0 0 0 3px rgba(15,122,60,.18)!important;outline:none}
 #login .lbox{border-top:5px solid #c8102e;border-bottom:5px solid #0f7a3c}
 #login .emb{margin:4px 0 8px}
 #login .btn.p{background:#0f7a3c;border-color:#0f7a3c}#login .btn.p:hover{background:#0c6531}
@@ -150,7 +153,7 @@ table.t td.n,table.t th.n{text-align:right}
 #pv .pvsheet{background:#fff;margin:20px auto;padding:10mm 9mm;box-shadow:0 4px 20px rgba(0,0,0,.35);color:#000;font:10.5pt/1.35 Arial,Helvetica,sans-serif;max-width:calc(100vw - 16px);overflow:auto}
 #pv .pvsheet .pw-c{padding:0}#pv .pvsheet .pw-m{height:0}
 
-#loading{position:fixed;inset:0;background:radial-gradient(circle at 50% 40%,#ffffff 0%,#f4f8f5 55%,#eef2f0 100%);color:#4a5263;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:22px;z-index:100;font-size:15px}
+#loading{position:fixed;inset:0;background:radial-gradient(circle at 50% 40%,#1c8a4f 0%,#0f5f35 40%,#0a4326 72%,#062b18 100%);color:#d7eadf;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:22px;z-index:100;font-size:15px}
 #loading .lmsg{min-height:20px}
 #print{display:none}
 video#cam{width:100%;max-width:480px;border-radius:8px;background:#000}
@@ -346,7 +349,7 @@ table.pt tr.grp td{background:#f0f0f0;font-weight:700;-webkit-print-color-adjust
 </style>
 </head>
 <body>
-<div id="loading"><div class="emb " style="--emb-s:120px"><div class="emb-disc"><div class="emb-b"></div></div><div class="emb-name">BAYAT CATERING</div><div class="emb-sub">Gestion du patrimoine</div></div><div class="lmsg">Chargement…</div></div>
+<div id="loading"><div class="emb dark" style="--emb-s:120px"><div class="emb-disc"><div class="emb-b"></div></div><div class="emb-name">BAYAT CATERING</div><div class="emb-sub">Gestion du patrimoine</div></div><div class="lmsg">Chargement…</div></div>
 <div id="app">
   <aside id="side">
     <div class="brand"><div class="emb row dark" style="--emb-s:52px"><div class="emb-disc"><div class="emb-b"></div></div><div class="emb-txt"><div class="emb-name">BAYAT CATERING</div><div class="emb-sub">Gestion du patrimoine</div></div></div></div>
