@@ -126,7 +126,7 @@ table.t td.n,table.t th.n{text-align:right}
 .toast.bad{background:var(--bad)}.toast.ok{background:var(--ok)}.toast.warn{background:var(--warn)}
 #top .camb{padding:6px 9px}
 .scanbig+.camb{margin-top:10px}
-#saved.sync-ok{color:var(--ok)}#saved.sync-off,#saved.sync-notable{color:var(--bad);font-weight:600}#saved.sync-sync{color:var(--info)}
+#saved.sync-ok{color:var(--ok)}#saved.sync-off,#saved.sync-notable{color:var(--bad);font-weight:600}#saved.sync-sync{color:var(--info)}#saved.sync-auth{color:var(--warn);font-weight:700}
 #ubox{display:flex;gap:6px;align-items:center}
 #ubox .uname{font-weight:600;font-size:13px;white-space:nowrap;margin-left:6px}
 #login{position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#16233f 0%,#1f3157 60%,#2a3e66 100%)}
@@ -1242,6 +1242,7 @@ async function hashPwd(login, pwd) {
 }
 async function ensureUsers() {
   if (!Array.isArray(DB.users)) DB.users = [];
+  if (SYNC.enabled) return; // base commune : les comptes sont gérés par l'administrateur
   let added = false;
   for (const u of DEFAULT_USERS) if (!DB.users.some(x => x.login === u.login)) { DB.users.push({ login: u.login, nom: u.nom, role: u.role, actif: true, hash: await hashPwd(u.login, u.pwd), createdAt: new Date().toISOString() }); added = true; }
   if (added) save();
@@ -1260,7 +1261,19 @@ function loginScreen() {
     document.body.appendChild(el);
     const f = el.querySelector('form'); setTimeout(() => f.u.focus(), 50);
     f.onsubmit = async e => {
-      e.preventDefault(); const login = f.u.value.trim().toLowerCase(); const u = DB.users.find(x => x.login === login);
+      e.preventDefault(); const login = f.u.value.trim().toLowerCase();
+      if (SYNC.enabled) { // base commune : compte Supabase vérifié par le serveur
+        const btn = f.querySelector('button'), pwd = f.p.value; btn.disabled = true; btn.textContent = 'Connexion…'; $('#lerr').textContent = '';
+        try { await authLogin(login, pwd); lvSet(login, await hashPwd(login, pwd)); el.remove(); resolve({ login, online: true }); return; }
+        catch (err) {
+          if (!err.status) { // pas de réseau : vérification locale si l'appareil a déjà été connecté avec ce compte
+            if (lvGet()[login] && lvGet()[login] === await hashPwd(login, pwd)) { if (AUTH.s && AUTH.s.login !== login) authSave(null); el.remove(); toast('Connexion hors ligne : la synchronisation reprendra au retour du réseau.', 'warn'); resolve({ login, online: false }); return; }
+            $('#lerr').textContent = 'Pas de connexion internet : la première connexion sur cet appareil doit se faire en ligne.';
+          } else $('#lerr').textContent = err.status === 403 ? 'Compte désactivé. Contactez l\'administrateur.' : 'Nom d\'utilisateur ou mot de passe incorrect.';
+          btn.disabled = false; btn.textContent = 'Se connecter'; f.p.value = ''; f.p.focus(); return;
+        }
+      }
+      const u = DB.users.find(x => x.login === login);
       if (u && u.actif !== false && u.hash === await hashPwd(login, f.p.value)) {
         USER = u; u.derniereConnexion = new Date().toISOString(); logAction('Connexion', `${u.login} (${u.role})`, u.login);
         try { sessionStorage.setItem('bp_user', login); } catch (e2) { }
@@ -1269,7 +1282,7 @@ function loginScreen() {
     };
   });
 }
-function logout() { try { sessionStorage.removeItem('bp_user'); } catch (e) { } location.hash = '#/'; location.reload(); }
+function logout() { try { sessionStorage.removeItem('bp_user'); } catch (e) { } if (typeof authSave === 'function') authSave(null); location.hash = '#/'; location.reload(); }
 function showUserBox() {
   const b = $('#ubox'); if (!b) return;
   b.innerHTML = `<span class="uname" title="${esc(USER.role)}">👤 ${esc(USER.nom || USER.login)}</span><button class="btn sm" id="umdp" title="Changer mon mot de passe">Mot de passe</button><button class="btn sm" id="uout">Déconnexion</button>`;
@@ -1278,8 +1291,22 @@ function showUserBox() {
 function pwdDialog(u, self) {
   modal(self ? 'Changer mon mot de passe' : `Mot de passe de « ${u.login} »`, `<div class="grid">${self ? field('Mot de passe actuel', '<input type="password" id="p0">') : ''}${field('Nouveau mot de passe', '<input type="password" id="p1">')}${field('Confirmer', '<input type="password" id="p2">')}</div>`,
     '<button class="btn p" id="pok">Enregistrer</button>', () => $('#pok').onclick = async () => {
-      if (self && u.hash !== await hashPwd(u.login, $('#p0').value)) return toast('Mot de passe actuel incorrect', 'bad');
       const a = $('#p1').value; if (a.length < 4) return toast('4 caractères minimum', 'bad'); if (a !== $('#p2').value) return toast('Les deux saisies ne correspondent pas', 'bad');
+      if (SYNC.enabled) { // comptes Supabase
+        const b = $('#pok'); b.disabled = true;
+        try {
+          if (self) {
+            const s = await authToken({ email: authEmail(u.login), password: AUTH.prefix + $('#p0').value }, 'password').catch(e => { throw e.status === 400 ? new Error('Mot de passe actuel incorrect') : e; });
+            authSave({ ...s, login: u.login });
+            const r = await fetch(`${SB.url}/auth/v1/user`, { method: 'PUT', headers: { apikey: SB.key, 'Content-Type': 'application/json', Authorization: 'Bearer ' + s.access_token }, body: JSON.stringify({ password: AUTH.prefix + a }) });
+            if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.msg || j.message || 'Modification refusée'); }
+            lvSet(u.login, await hashPwd(u.login, a)); logAction('Mot de passe changé', u.login, u.login);
+          } else { await authEdge('set-password', { login: u.login, password: a }, true); logAction('Mot de passe réinitialisé', u.login, u.login); }
+          closeModal(); toast('Mot de passe modifié', 'ok');
+        } catch (e) { b.disabled = false; toast(!e.status && e instanceof TypeError ? 'Connexion internet nécessaire pour changer un mot de passe' : e.message, 'bad'); }
+        return;
+      }
+      if (self && u.hash !== await hashPwd(u.login, $('#p0').value)) return toast('Mot de passe actuel incorrect', 'bad');
       u.hash = await hashPwd(u.login, a); save(); closeModal(); toast('Mot de passe modifié', 'ok');
     });
 }
@@ -1403,14 +1430,22 @@ function usersTab(box) {
   $$('[data-k]', box).forEach(x => x.onchange = () => { const u = DB.users[+x.dataset.i]; const old = u[x.dataset.k]; u[x.dataset.k] = x.value;
     if (x.dataset.k === 'role' && x.value !== 'Administrateur' && !DB.users.some(v => v.role === 'Administrateur' && v.actif !== false)) { u.role = old; x.value = old; return toast('Il doit rester au moins un administrateur actif.', 'bad'); }
     logAction(x.dataset.k === 'role' ? 'Profil utilisateur modifié' : 'Utilisateur modifié', `${u.login} : ${old || '—'} → ${x.value}`, u.login); toast('Enregistré', 'ok'); });
-  $$('[data-pw]', box).forEach(b => b.onclick = () => { const u = DB.users[+b.dataset.pw]; pwdDialog(u, false); logAction('Mot de passe réinitialisé', u.login, u.login); });
+  $$('[data-pw]', box).forEach(b => b.onclick = () => { const u = DB.users[+b.dataset.pw]; pwdDialog(u, false); if (!SYNC.enabled) logAction('Mot de passe réinitialisé', u.login, u.login); });
   $$('[data-ac]', box).forEach(b => b.onclick = () => { const u = DB.users[+b.dataset.ac]; u.actif = u.actif === false; logAction(u.actif ? 'Utilisateur activé' : 'Utilisateur désactivé', u.login, u.login); render(); });
   $$('[data-del]', box).forEach(b => b.onclick = async () => { const u = DB.users[+b.dataset.del]; const m = await askMotif('Supprimer un utilisateur', `Supprimer le compte <b>${esc(u.login)}</b> ? Son historique (saisies, mouvements) est conservé. Préférez « Désactiver » si le compte peut resservir.`, 'Supprimer'); if (m === null) return; DB.users = DB.users.filter(x => x !== u); logAction('Utilisateur supprimé', `${u.login}${m ? ' – motif : ' + m : ''}`, u.login); render(); });
   $('#na').onclick = async () => {
     const l = $('#nl').value.trim().toLowerCase(); if (!/^[a-z0-9._-]{3,}$/.test(l)) return toast('Nom d\'utilisateur : 3 caractères min., lettres/chiffres sans espace', 'bad');
     if (DB.users.some(u => u.login === l)) return toast('Cet utilisateur existe déjà', 'bad'); if ($('#np').value.length < 4) return toast('Mot de passe : 4 caractères minimum', 'bad');
-    DB.users.push({ login: l, nom: clean($('#nn').value) || l, role: $('#nr').value, actif: true, hash: await hashPwd(l, $('#np').value), createdAt: new Date().toISOString() });
-    logAction('Utilisateur créé', `${l} – profil ${$('#nr').value}`, l); toast('Utilisateur ajouté', 'ok'); render();
+    const pwd = $('#np').value, role = $('#nr').value;
+    if (SYNC.enabled) { // fiche dans la base commune, puis compte Supabase avec ce mot de passe
+      DB.users.push({ login: l, nom: clean($('#nn').value) || l, role, actif: true, createdAt: new Date().toISOString() });
+      logAction('Utilisateur créé', `${l} – profil ${role}`, l); await syncNow();
+      try { await authEdge('set-password', { login: l, password: pwd }, true); toast('Utilisateur ajouté : il peut se connecter', 'ok'); }
+      catch (e) { toast('Fiche créée, mais le mot de passe n\'a pas pu être enregistré (' + e.message + ') : utilisez le bouton « Mot de passe ».', 'bad'); }
+      render(); return;
+    }
+    DB.users.push({ login: l, nom: clean($('#nn').value) || l, role, actif: true, hash: await hashPwd(l, pwd), createdAt: new Date().toISOString() });
+    logAction('Utilisateur créé', `${l} – profil ${role}`, l); toast('Utilisateur ajouté', 'ok'); render();
   };
 }
 
@@ -1506,17 +1541,56 @@ function canon(v) { if (Array.isArray(v)) return '[' + v.map(canon).join(',') + 
 const HASHV = 2;
 const hashOf = o => fnv(canon(o));
 function fnv(s) { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + '.' + s.length; }
+/* Fiches qu'un compte non administrateur ne peut pas modifier : jamais envoyées, toujours reprises du serveur */
+const readOnlyKey = (kind, id) => (typeof isAdmin === 'function' && USER && !isAdmin()) && (kind === 'cfg' || (kind === 'user' && id !== USER.login));
 function computeDiff() {
   const ch = [], seen = new Set();
-  for (const [kind, id, o] of allRecords()) { const k = kind + '|' + id, h = hashOf(o); seen.add(k); if (SYNC.snap.get(k) !== h) ch.push({ k, h, row: { kind, id, data: JSON.parse(JSON.stringify(o)), deleted: false, updated_by: who() || null } }); }
-  for (const k of SYNC.snap.keys()) if (!seen.has(k)) { const [kind, ...r] = k.split('|'); ch.push({ k, h: null, row: { kind, id: r.join('|'), data: {}, deleted: true, updated_by: who() || null } }); }
+  for (const [kind, id, o] of allRecords()) { const k = kind + '|' + id; seen.add(k); if (readOnlyKey(kind, id)) continue; const h = hashOf(o); if (SYNC.snap.get(k) !== h) ch.push({ k, h, row: { kind, id, data: JSON.parse(JSON.stringify(o)), deleted: false, updated_by: who() || null } }); }
+  for (const k of SYNC.snap.keys()) if (!seen.has(k)) { const [kind, ...r] = k.split('|'); if (readOnlyKey(kind, r.join('|'))) continue; ch.push({ k, h: null, row: { kind, id: r.join('|'), data: {}, deleted: true, updated_by: who() || null } }); }
   return ch;
 }
 
 /* ---------- Appels REST ---------- */
-async function sbFetch(path, opt = {}) {
-  const r = await fetch(SB.url + '/rest/v1/' + path, { ...opt, headers: { apikey: SB.key, 'Content-Type': 'application/json', ...(opt.headers || {}) } });
-  if (!r.ok) { let t = ''; try { t = await r.text(); } catch (e) { } const err = new Error(`HTTP ${r.status} ${t.slice(0, 200)}`); err.status = r.status; err.body = t; throw err; }
+/* ---------- Comptes Supabase : connexion, jeton, renouvellement ---------- */
+const AUTH = { s: null, domain: 'patrimoine-bayat.app', prefix: 'bayat#' };
+function authLoad() { try { AUTH.s = JSON.parse(localStorage.getItem('bp_auth') || 'null'); } catch (e) { AUTH.s = null; } return AUTH.s; }
+function authSave(s) { AUTH.s = s; try { s ? localStorage.setItem('bp_auth', JSON.stringify(s)) : localStorage.removeItem('bp_auth'); } catch (e) { } }
+const authEmail = l => `${l}@${AUTH.domain}`;
+async function authToken(body, grant) {
+  const r = await fetch(`${SB.url}/auth/v1/token?grant_type=${grant}`, { method: 'POST', headers: { apikey: SB.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(j.error_description || j.msg || j.message || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+  return { login: (j.user && j.user.app_metadata && j.user.app_metadata.login) || '', access_token: j.access_token, refresh_token: j.refresh_token, expires_at: Date.now() + (j.expires_in || 3600) * 1000 };
+}
+/** Service de connexion (migration des comptes, mots de passe gérés par l'admin) */
+async function authEdge(action, payload, withToken) {
+  const h = { apikey: SB.key, 'Content-Type': 'application/json' };
+  if (withToken) { await authFresh(); if (!AUTH.s) { const e = new Error('Session expirée : reconnectez-vous'); e.status = 401; throw e; } h.Authorization = 'Bearer ' + AUTH.s.access_token; }
+  const r = await fetch(`${SB.url}/functions/v1/auth-pont`, { method: 'POST', headers: h, body: JSON.stringify({ action, ...payload }) });
+  const j = await r.json().catch(() => ({})); if (!r.ok) { const e = new Error(j.error || ('HTTP ' + r.status)); e.status = r.status; throw e; } return j;
+}
+/** Connexion en ligne ; au premier passage, l'ancien mot de passe crée le vrai compte (migration) */
+async function authLogin(login, pwd) {
+  const tryTok = async () => { const s = await authToken({ email: authEmail(login), password: AUTH.prefix + pwd }, 'password'); authSave({ ...s, login }); return AUTH.s; };
+  try { return await tryTok(); }
+  catch (e) { if (e.status !== 400) throw e; await authEdge('migrate', { login, password: pwd }); return await tryTok(); }
+}
+async function authFresh() {
+  const s = AUTH.s; if (!s) return null;
+  if (Date.now() < s.expires_at - 60000) return s;
+  try { const n = await authToken({ refresh_token: s.refresh_token }, 'refresh_token'); authSave({ ...n, login: s.login }); return AUTH.s; }
+  catch (e) { if (e.status === 400 || e.status === 401 || e.status === 403) authSave(null); throw e; }
+}
+/* Vérificateur local (connexion hors ligne sur un appareil déjà connecté en ligne) */
+function lvGet() { try { return JSON.parse(localStorage.getItem('bp_lv') || '{}'); } catch (e) { return {}; } }
+function lvSet(login, h) { try { const v = lvGet(); v[login] = h; localStorage.setItem('bp_lv', JSON.stringify(v)); } catch (e) { } }
+
+async function sbFetch(path, opt = {}, retry = true) {
+  const h = { apikey: SB.key, 'Content-Type': 'application/json', ...(opt.headers || {}) };
+  if (AUTH.s) { try { await authFresh(); } catch (e) { if (!e.status) throw e; } if (AUTH.s) h.Authorization = 'Bearer ' + AUTH.s.access_token; }
+  const r = await fetch(SB.url + '/rest/v1/' + path, { ...opt, headers: h });
+  if (r.status === 401 && retry && AUTH.s) { AUTH.s.expires_at = 0; return sbFetch(path, opt, false); }
+  if (!r.ok) { let t = ''; try { t = await r.text(); } catch (e) { } const err = new Error(`HTTP ${r.status} ${t.slice(0, 200)}`); err.status = r.status; err.body = t; try { err.msg = JSON.parse(t).message; } catch (e) { } throw err; }
   return r;
 }
 async function fetchRows(since, onPage) {
@@ -1529,14 +1603,35 @@ async function fetchRows(since, onPage) {
   }
   return out;
 }
+/** Envoi par lots ; si le serveur refuse un lot (droits), on isole les fiches refusées. Renvoie les refus. */
 async function pushRows(rows, onProgress) {
-  const B = 400;
+  const B = 400, rejected = [];
+  const post = part => sbFetch(`${SB.table}?on_conflict=kind,id`, { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(part) });
+  const fatal = e => !e.status || e.status >= 500 || e.status === 401 || e.status === 404;
   for (let i = 0; i < rows.length; i += B) {
-    await sbFetch(`${SB.table}?on_conflict=kind,id`, { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(rows.slice(i, i + B)) });
+    const part = rows.slice(i, i + B);
+    try { await post(part); }
+    catch (e) {
+      if (fatal(e)) throw e;
+      for (const row of part) { try { await post([row]); } catch (e2) { if (fatal(e2)) throw e2; rejected.push({ row, msg: e2.msg || e2.message }); } }
+    }
     if (onProgress) onProgress(Math.min(rows.length, i + B), rows.length);
   }
+  return rejected;
+}
+/** Fiches refusées : on reprend la version du serveur (ou on retire la fiche si elle n'existe pas sur le serveur) */
+async function revertRejected(rej) {
+  const rows = [];
+  for (const { row } of rej) {
+    try { const r = await sbFetch(`${SB.table}?select=kind,id,data,deleted,updated_at&kind=eq.${encodeURIComponent(row.kind)}&id=eq.${encodeURIComponent(row.id)}`); const a = await r.json(); rows.push(a[0] || { kind: row.kind, id: row.id, deleted: true, data: {} }); }
+    catch (e) { }
+  }
+  return applyRemote(rows, true);
 }
 const maxTs = (rows, cur) => rows.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), cur || '');
+
+/* Les empreintes de mot de passe ne sont plus conservées dans les fiches utilisateurs (comptes Supabase) */
+const recData = (kind, d) => { if (kind !== 'user' || !d || !('hash' in d)) return d; const c = { ...d }; delete c.hash; return c; };
 
 /* ---------- Construction de la base à partir du serveur ---------- */
 function dbFromRows(rows) {
@@ -1544,12 +1639,12 @@ function dbFromRows(rows) {
   for (const r of rows) {
     if (r.deleted) continue;
     if (r.kind === 'cfg') { const c = r.data || {}; if (c.entreprise) db.entreprise = c.entreprise; if (c.categories) db.categories = c.categories; if (c.etats) db.etats = c.etats; if (c.profils) db.profils = c.profils; if (c.regles) db.regles = c.regles; db.meta.scSeq = c.scSeq || 0; if (c.created) db.meta.created = c.created; continue; }
-    const arr = KIND_ARR[r.kind]; if (arr) db[arr].push(r.data);
+    const arr = KIND_ARR[r.kind]; if (arr) db[arr].push(recData(r.kind, r.data));
   }
   for (const a of ['materiels', 'mouvements', 'bons', 'inventaires', 'audit']) db[a].sort((x, y) => x.id - y.id);
   return db;
 }
-function snapFromRows(rows) { const s = new Map(); for (const r of rows) { const k = r.kind + '|' + r.id; if (r.deleted) s.delete(k); else s.set(k, hashOf(r.data)); } return s; }
+function snapFromRows(rows) { const s = new Map(); for (const r of rows) { const k = r.kind + '|' + r.id; if (r.deleted) s.delete(k); else s.set(k, hashOf(recData(r.kind, r.data))); } return s; }
 
 /* ---------- Récupération des saisies faites avant la base commune ---------- */
 function migrateLocalExtras(old) {
@@ -1594,6 +1689,7 @@ async function cloudInit(cached, meta) {
     }
     setTimeout(() => syncNow(), 300); return;
   }
+  if (!AUTH.s) throw Object.assign(new Error('Première ouverture sur cet appareil : une connexion internet est nécessaire.'), { status: 0 });
   loadingMsg('Connexion à la base commune…');
   const rows = await fetchRows('', n => loadingMsg(`Téléchargement de la base commune… ${fmtNum(n)} fiches`));
   if (!rows.filter(r => !r.deleted).length) {
@@ -1624,30 +1720,45 @@ function syncSchedule() { if (!SYNC.enabled || !SYNC.ready) return; clearTimeout
 async function syncNow() {
   if (!SYNC.enabled || !SYNC.ready) return;
   if (SYNC.busy) { SYNC.again = true; return; }
+  if (!AUTH.s) { SYNC.pending = computeDiff().length; setSyncState('auth'); return; }
   SYNC.busy = true; setSyncState('sync');
   try {
-    // 1. envoi des modifications locales
+    // 1. envoi des modifications locales (les fiches refusées par le serveur reprennent leur version serveur)
     const ch = computeDiff(); SYNC.pending = ch.length;
-    if (ch.length) { await pushRows(ch.map(c => c.row)); for (const c of ch) c.h ? SYNC.snap.set(c.k, c.h) : SYNC.snap.delete(c.k); SYNC.pending = 0; }
+    if (ch.length) {
+      const rej = await pushRows(ch.map(c => c.row));
+      if (!AUTH.s) throw Object.assign(new Error('Session expirée'), { status: 401 }); const rk = new Set(rej.map(x => x.row.kind + '|' + x.row.id));
+      for (const c of ch) if (!rk.has(c.k)) c.h ? SYNC.snap.set(c.k, c.h) : SYNC.snap.delete(c.k);
+      SYNC.pending = 0;
+      if (rej.length) {
+        if (rej.some(x => /inactif ou inconnu/i.test(x.msg || ''))) { toast('Votre compte n\'est plus autorisé : déconnexion.', 'bad'); setTimeout(logout, 1500); throw new Error('compte inactif'); }
+        const nr = await revertRejected(rej); if (nr) onRemoteChange(0);
+        toast(`Refusé par le serveur : ${rej[0].msg}${rej.length > 1 ? ` (+${rej.length - 1} autre(s))` : ''}. Les données ont été rétablies.`, 'bad');
+      }
+    }
     // 2. réception des modifications des autres
     const since = SYNC.lastSync ? new Date(new Date(SYNC.lastSync).getTime() - 60000).toISOString() : '';
     const rows = since || !SYNC.lastSync ? await fetchRows(since) : [];
+    if (!AUTH.s) throw Object.assign(new Error('Session expirée'), { status: 401 }); // sans session, le serveur ne renvoie rien : ne rien conclure
     const n = applyRemote(rows); SYNC.lastSync = maxTs(rows, SYNC.lastSync);
+    // 3. compte toujours autorisé ? (un compte désactivé ne voit plus aucune fiche)
+    if (USER && AUTH.s) { const me = await (await sbFetch(`${SB.table}?select=id&kind=eq.user&id=eq.${encodeURIComponent(USER.login)}`)).json(); if (!me.length && AUTH.s) { toast('Votre compte a été désactivé ou supprimé : déconnexion.', 'bad'); setTimeout(logout, 1500); throw new Error('compte inactif'); } }
     await saveSyncMeta(); if (n) { await Store.set('db', DB).catch(() => { }); }
     SYNC.err = ''; setSyncState('ok');
     if (n) onRemoteChange(n);
-  } catch (e) { console.warn('sync', e); SYNC.err = e.message; SYNC.pending = computeDiff().length; setSyncState(e.status === 404 || /records/.test(e.body || '') ? 'notable' : 'off'); }
+  } catch (e) { console.warn('sync', e); SYNC.err = e.message; SYNC.pending = computeDiff().length; setSyncState(!AUTH.s ? 'auth' : e.status === 404 || /records/.test(e.body || '') ? 'notable' : 'off'); }
   SYNC.busy = false;
   if (SYNC.again) { SYNC.again = false; setTimeout(() => syncNow(), 200); }
 }
 /** Applique les fiches reçues ; ignore celles modifiées localement et pas encore envoyées */
-function applyRemote(rows) {
+function applyRemote(rows, force = false) {
   if (!rows.length) return 0;
   const local = new Map(); for (const [kind, id, o] of allRecords()) local.set(kind + '|' + id, o);
   let n = 0; const touchedMat = new Set(); const removed = {};
-  for (const r of rows) {
+  for (let r of rows) {
     const k = r.kind + '|' + r.id, lo = local.get(k), lh = lo ? hashOf(lo) : null;
-    if (lo && SYNC.snap.get(k) !== lh) continue; // modification locale en attente : elle sera envoyée
+    if (!r.deleted) r = { ...r, data: recData(r.kind, r.data) };
+    if (lo && SYNC.snap.get(k) !== lh && !force && !readOnlyKey(r.kind, r.id)) continue; // modification locale en attente : elle sera envoyée
     if (r.deleted) {
       if (lo) { const arr = KIND_ARR[r.kind]; if (arr) { (removed[arr] = removed[arr] || new Set()).add(lo); n++; if (r.kind === 'mv') touchedMat.add(lo.matId); } }
       SYNC.snap.delete(k); local.delete(k); continue;
@@ -1667,7 +1778,7 @@ function applyRemote(rows) {
   return n;
 }
 function onRemoteChange(n) {
-  refreshLists(); if (USER && USER.actif === false) { toast('Votre compte a été désactivé par l\'administrateur.', 'bad'); setTimeout(logout, 1500); return; }
+  refreshLists(); if (!n) { render(); return; } if (USER && USER.actif === false) { toast('Votre compte a été désactivé par l\'administrateur.', 'bad'); setTimeout(logout, 1500); return; }
   if (typeof applyNavPerms === 'function') { ensureAdminDefaults(); applyNavPerms(); if (!routeAllowed(location.hash || '#/')) { go('#/'); return; } }
   const h = location.hash || '#/';
   const typing = document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && document.activeElement.id !== 'qscan';
@@ -1677,8 +1788,8 @@ function onRemoteChange(n) {
 }
 function setSyncState(s) {
   SYNC.state = s; const el = document.getElementById('saved'); if (!el) return;
-  const T = { ok: ['☁ Synchronisé', 'Données partagées à jour – cliquer pour synchroniser maintenant'], sync: ['⟳ Synchronisation…', ''], off: [`⚠ Hors ligne${SYNC.pending ? ' (' + SYNC.pending + ' en attente)' : ''}`, 'Pas de connexion à la base commune : les saisies sont gardées sur cet appareil et partiront au retour du réseau. ' + (SYNC.err || '')], notable: ['⚠ Base commune non installée', 'La table « records » est introuvable : exécutez le script SQL dans Supabase.'], local: ['Enregistré localement', ''] };
-  const [t, tip] = T[s] || T.local; el.textContent = t; el.title = tip; el.className = 'sync-' + s; el.style.cursor = 'pointer'; el.onclick = () => syncNow();
+  const T = { ok: ['☁ Synchronisé', 'Données partagées à jour – cliquer pour synchroniser maintenant'], sync: ['⟳ Synchronisation…', ''], off: [`⚠ Hors ligne${SYNC.pending ? ' (' + SYNC.pending + ' en attente)' : ''}`, 'Pas de connexion à la base commune : les saisies sont gardées sur cet appareil et partiront au retour du réseau. ' + (SYNC.err || '')], notable: ['⚠ Base commune non installée', 'La table « records » est introuvable : exécutez le script SQL dans Supabase.'], local: ['Enregistré localement', ''], auth: [`🔑 Reconnexion nécessaire${SYNC.pending ? ' (' + SYNC.pending + ' en attente)' : ''}`, 'Votre session a expiré : cliquez pour vous reconnecter et envoyer vos saisies.'] };
+  const [t, tip] = T[s] || T.local; el.textContent = t; el.title = tip; el.className = 'sync-' + s; el.style.cursor = 'pointer'; el.onclick = () => s === 'auth' ? reconnectDialog() : syncNow();
 }
 function startPolling() {
   if (!SYNC.enabled || !SYNC.ready) { setSyncState('local'); return; }
@@ -1699,6 +1810,14 @@ function cloudErrorScreen(e, hasLocal) {
       <p style="font-size:12px;color:#6b7385">Détail : ${esc(e.message || '')}</p>
       <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;flex-wrap:wrap"><button class="btn p" id="ce-r">Réessayer</button><button class="btn" id="ce-l">Continuer ${hasLocal ? 'avec les données de cet appareil' : 'hors ligne'}</button></div></div>`;
     $('#ce-r').onclick = () => location.reload(); $('#ce-l').onclick = () => res('local');
+  });
+}
+
+/** Reconnexion sans quitter l'application (session expirée, ou connexion hors ligne) */
+function reconnectDialog() {
+  modal('Reconnexion', `<p>Saisissez votre mot de passe pour reprendre la synchronisation (compte <b>${esc(USER ? USER.login : '')}</b>).</p>${field('Mot de passe', '<input type="password" id="rcp">')}`, '<button class="btn p" id="rcok">Se reconnecter</button>', () => {
+    setTimeout(() => $('#rcp') && $('#rcp').focus(), 50);
+    $('#rcok').onclick = async () => { try { await authLogin(USER.login, $('#rcp').value); lvSet(USER.login, await hashPwd(USER.login, $('#rcp').value)); closeModal(); toast('Reconnecté', 'ok'); syncNow(); } catch (e) { toast(!e.status ? 'Pas de connexion internet' : 'Mot de passe incorrect', 'bad'); } };
   });
 }
 
@@ -2450,10 +2569,17 @@ function exportAll() {
 const SEED = () => JSON.parse(document.getElementById('seed').textContent);
 const hasSeed = () => { try { return (SEED().rows || []).length > 0; } catch (e) { return false; } };
 async function boot() {
-  let cached = null, meta = null, info = null;
+  let cached = null, meta = null, info = null, who0 = null;
   try { cached = await Store.get('db'); meta = await Store.get('sync'); } catch (e) { console.warn(e); toast('Stockage local indisponible sur cet appareil.', 'bad'); }
   try {
     if (SYNC.enabled) {
+      // 1. connexion (compte Supabase) AVANT tout téléchargement
+      authLoad();
+      let sl = null; try { sl = sessionStorage.getItem('bp_user'); } catch (e) { }
+      if (sl && AUTH.s && AUTH.s.login === sl) who0 = sl;
+      else { const l = $('#loading'); l.style.display = 'none'; const r = await loginScreen(); who0 = r.login; l.style.display = ''; loadingMsg('Ouverture…'); }
+      try { sessionStorage.setItem('bp_user', who0); } catch (e) { }
+      // 2. base commune
       try { info = await cloudInit(cached, meta); }
       catch (e) {
         console.error(e); await cloudErrorScreen(e, !!(cached && cached.materiels));
@@ -2464,10 +2590,17 @@ async function boot() {
     else { DB = emptyDB(); reindex(); importRows(SEED(), { replace: true }); reindex(); await Store.set('db', DB).catch(() => { }); }
   } catch (e) { console.error(e); $('#loading').innerHTML = 'Erreur au démarrage : ' + esc(e.message); return; }
   await ensureUsers(); if (ensureAdminDefaults()) save();
+  for (const u of DB.users) if (SYNC.enabled && 'hash' in u) delete u.hash;
   $('#loading').remove();
-  let sl = null; try { sl = sessionStorage.getItem('bp_user'); } catch (e) { }
-  USER = sl && DB.users.find(u => u.login === sl && u.actif !== false);
-  if (!USER) await loginScreen();
+  if (SYNC.enabled) {
+    USER = DB.users.find(u => u.login === who0);
+    if (!USER || USER.actif === false) { const l = document.createElement('div'); l.id = 'login'; l.innerHTML = `<div class="lbox"><div class="logo">B</div><p style="text-align:center">Le compte <b>${esc(who0)}</b> n'est pas autorisé dans la base commune (désactivé ou supprimé).</p><button class="btn p" id="lo">Changer de compte</button></div>`; document.body.appendChild(l); $('#lo').onclick = logout; return; }
+    USER.derniereConnexion = new Date().toISOString(); logAction('Connexion', `${USER.login} (${USER.role})${AUTH.s ? '' : ' – hors ligne'}`, USER.login);
+  } else {
+    let sl = null; try { sl = sessionStorage.getItem('bp_user'); } catch (e) { }
+    USER = sl && DB.users.find(u => u.login === sl && u.actif !== false);
+    if (!USER) await loginScreen();
+  }
   showUserBox(); addCamButton($('#qscan')); startPolling(); setupMobileNav(); applyNavPerms(); setupIdle(); _mo.observe($('#main'), { childList: true, subtree: true });
   if (info && info.migrated) { const m = info.migrated; toast(`Saisies de cet appareil envoyées dans la base commune : ${m.mat} matériel(s), ${m.mv} mouvement(s), ${m.bon} bon(s).`, 'ok'); }
   if (info && info.initial) toast('Base commune créée à partir de cet appareil.', 'ok');
